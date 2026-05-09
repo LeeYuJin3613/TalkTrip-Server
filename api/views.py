@@ -45,3 +45,12 @@ def receive_kakao_text(request):
             return JsonResponse({'error': str(e)}, status=400)
 
     return JsonResponse({'error': 'POST 요청만 가능합니다.'}, status=405)
+
+
+# 테스트용 #
+def test_connection(request):
+    # 프론트엔드로 보내줄 데이터 (JSON 형식)
+    data = {
+        "message": "환영합니다! TalkTrip 백엔드와 성공적으로 연결되었습니다! 🎉"
+    }
+    return JsonResponse(data)
