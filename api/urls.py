@@ -4,4 +4,6 @@ from . import views
 urlpatterns = [
     path('api/kakao/', receive_kakao_text),
     path('api/test/', views.test_connection),
+
+    path('receive-kakao-text/', views.receive_kakao_text, name='receive_kakao_text'),
 ]
