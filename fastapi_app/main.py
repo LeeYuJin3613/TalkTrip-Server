@@ -1,36 +1,68 @@
+import json
+from typing import List, Dict, Any
+
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List, Optional
 
+from fastapi_app.inference.stage1 import predict_stage1
+from fastapi_app.inference.stage2 import predict_stage2
+from fastapi_app.inference.stage3 import predict_stage3
+from fastapi_app.schedule_builder import process
 
 app = FastAPI()
 
 
-class MessageItem(BaseModel):
-    id: int
-    date: Optional[str] = None
-    time: Optional[str] = None
-    speaker: str
-    message: str
-
-
 class AnalyzeRequest(BaseModel):
+    chat_file_id: int
     raw_text: str
-    messages: List[MessageItem]
+    messages: List[Dict[str, Any]]
 
 
-@app.post("/analyze")
+@app.post("/ai/analyze")
 def analyze_chat(data: AnalyzeRequest):
-    print("=== FastAPI가 받은 데이터 ===")
-    print("원본 텍스트:")
-    print(data.raw_text)
-    print("전처리 메시지:")
-    for msg in data.messages:
-        print(msg)
+    analyzed_messages = []
 
+    for idx, msg in enumerate(data.messages):
+        message_text = msg.get("message", "")
+        context_text = msg.get("context") or message_text
+
+        is_travel_related = predict_stage1(context_text)
+
+        if is_travel_related:
+            entities = predict_stage2(message_text)
+            intent = predict_stage3(message_text)
+        else:
+            entities = []
+            intent = "NOT_TRAVEL"
+
+        result = {
+            "source": f"chat_{data.chat_file_id}",
+            "global_idx": idx + 1,
+            "timestamp": msg.get("timestamp", ""),
+            "text": message_text,
+            "context": context_text,
+            "in_travel_span": is_travel_related,
+            "intent": intent,
+            "entities": entities,
+        }
+
+        analyzed_messages.append(result)
+
+        print(
+            f"[{idx + 1}] {result['timestamp']} | "
+            f"{message_text} | "
+            f"travel={is_travel_related} | "
+            f"intent={intent} | "
+            f"entities={entities}"
+        )
+
+    trip_summaries = process(analyzed_messages, verbose=True)
+    print("=== 최종 일정표 JSON ===")
+    print(json.dumps(trip_summaries, ensure_ascii=False, indent=2))
     return {
-        "message": "FastAPI가 데이터를 잘 받았습니다.",
-        "raw_text": data.raw_text,
+        "status": "success",
+        "chat_file_id": data.chat_file_id,
         "message_count": len(data.messages),
-        "messages": data.messages
+        "analyzed_messages": analyzed_messages,
+        "trip_summaries": trip_summaries,
     }
