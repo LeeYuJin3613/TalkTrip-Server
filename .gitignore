@@ -1,0 +1,17 @@
+# virtual env
+.venv/
+
+# AI model files
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.pyc
+
+# model folders
+fastapi_app/models/
+
+# outputs
+result/
+outputs/
+checkpoints/
