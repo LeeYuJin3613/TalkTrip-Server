@@ -46,17 +46,30 @@ def receive_kakao_text(request):
             print(f"=== DB 저장 완료: {len(parsed_objects)}건 ===")
 
             try:
+                print("=== FastAPI 호출 직전 ===")
+                print("FastAPI URL:", "http://127.0.0.1:8001/ai/analyze")
+                print("message count:", len(messages))
+
                 fastapi_response = requests.post(
-                    "http://127.0.0.1:8001/analyze",
+                    "http://127.0.0.1:8001/ai/analyze",
                     json={
                         "chat_file_id": chat_file_obj.id,
                         "raw_text": raw_text,
                         "messages": messages,
                     },
-                    timeout=5,
+                    timeout=30,
                 )
+
+                print("=== FastAPI 응답 상태 ===")
+                print("status_code:", fastapi_response.status_code)
+                print("response_text:", fastapi_response.text)
+
                 fastapi_result = fastapi_response.json()
+
             except Exception as e:
+                print("=== FastAPI 연결 실패 ===")
+                print(str(e))
+
                 fastapi_result = {
                     "warning": f"FastAPI 연결 실패: {str(e)}"
                 }

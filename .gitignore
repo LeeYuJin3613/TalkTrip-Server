@@ -1,6 +1,17 @@
+# virtual env
 .venv/
-__pycache__/
+
+# AI model files
+*.safetensors
+*.bin
+*.pt
+*.pth
 *.pyc
-db.sqlite3
-.idea/
-.env
+
+# model folders
+fastapi_app/models/
+
+# outputs
+result/
+outputs/
+checkpoints/
