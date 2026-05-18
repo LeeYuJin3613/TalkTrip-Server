@@ -4,8 +4,34 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
 from .preprocess import parse_kakao_chat
-from .models import ChatFile, ParsedMessage
+from .models import (
+    ChatFile,
+    ParsedMessage,
+    AIExtractionResult,
+    TripPlan,
+    Day,
+    Place,
+    Event,
+)
 
+from datetime import datetime, timedelta
+def parse_date(value):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def parse_datetime(base_date, time_value):
+    if not base_date or not time_value:
+        return None
+    try:
+        parsed_time = datetime.strptime(time_value, "%H:%M").time()
+        return datetime.combine(base_date, parsed_time)
+    except ValueError:
+        return None
 
 @csrf_exempt
 def receive_kakao_text(request):
@@ -65,6 +91,84 @@ def receive_kakao_text(request):
                 print("response_text:", fastapi_response.text)
 
                 fastapi_result = fastapi_response.json()
+                print("=== fastapi_result 타입 ===")
+                print(type(fastapi_result))
+                print("=== fastapi_result 실제 내용 ===")
+                print(json.dumps(fastapi_result, ensure_ascii=False, indent=2))
+
+                # FastAPI 응답 구조 대응
+                if isinstance(fastapi_result, dict):
+                    result = fastapi_result.get("trip_summaries", [{}])[0]
+                else:
+                    result = {}
+
+                print("=== DB 저장에 사용할 result ===")
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+
+                print("destination:", result.get("destination"))
+                print("duration:", result.get("duration"))
+                print("start_date:", result.get("start_date"))
+                print("days 개수:", len(result.get("days", [])))
+
+                print("=== DB 저장에 사용할 result ===")
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+                AIExtractionResult.objects.create(
+                    chat_file=chat_file_obj,
+                    confidence=result.get("confidence"),
+                    extracted_json=result,
+                )
+
+                start_date = parse_date(result.get("start_date"))
+
+                trip_plan = TripPlan.objects.create(
+                    chat_file=chat_file_obj,
+                    trip_name=f"{result.get('destination', '여행')} 일정",
+                    thumbnail_url=None,
+                    destination=result.get("destination"),
+                    duration=result.get("duration"),
+                    departure_date=start_date,
+                    return_date=None,
+                    status="planning",
+                )
+
+                for day_data in result.get("days", []):
+                    day_number = day_data.get("day")
+
+                    actual_date = None
+                    if start_date and day_number:
+                        actual_date = start_date + timedelta(days=int(day_number) - 1)
+
+                    day_obj = Day.objects.create(
+                        trip_plan=trip_plan,
+                        day_number=day_number,
+                        actual_date=actual_date,
+                    )
+
+                    for event_data in day_data.get("events", []):
+                        location = event_data.get("location")
+                        if not location:
+                            continue
+
+                        place_obj, _ = Place.objects.get_or_create(
+                            name=location,
+                            defaults={
+                                "type": event_data.get("category"),
+                                "latitude": None,
+                                "longitude": None,
+                                "region": result.get("destination"),
+                            },
+                        )
+
+                        Event.objects.create(
+                            day=day_obj,
+                            place=place_obj,
+                            start_datetime=parse_datetime(
+                                actual_date,
+                                event_data.get("time"),
+                            ),
+                            end_datetime=None,
+                            activity=event_data.get("memo") or event_data.get("source_text"),
+                        )
 
             except Exception as e:
                 print("=== FastAPI 연결 실패 ===")
@@ -75,8 +179,9 @@ def receive_kakao_text(request):
                 }
 
             return JsonResponse({
-                "message": "카카오톡 텍스트 수신, 전처리, DB 저장 성공",
+                "message": "카카오톡 텍스트 수신, 전처리, DB 저장, AI 일정 저장 성공",
                 "chat_file_id": chat_file_obj.id,
+                "trip_plan_id": trip_plan.id if "trip_plan" in locals() else None,
                 "preprocessed_count": len(messages),
                 "parsed_messages": messages,
                 "fastapi_result": fastapi_result,
