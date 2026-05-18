@@ -276,3 +276,46 @@ def test_connection(request):
     return JsonResponse({
         "message": "백엔드와 성공적으로 연결되었습니다!"
     })
+
+def trip_plan_detail(request, trip_plan_id):
+    try:
+        trip_plan = TripPlan.objects.get(id=trip_plan_id)
+
+        days_data = []
+
+        for day in trip_plan.days.all().order_by("day_number"):
+            events_data = []
+
+            for event in day.events.all().order_by("start_datetime"):
+                place = event.place
+
+                events_data.append({
+                    "id": event.id,
+                    "time": event.start_datetime.strftime("%H:%M") if event.start_datetime else None,
+                    "place_name": place.name,
+                    "activity": event.activity,
+                    "latitude": place.latitude,
+                    "longitude": place.longitude,
+                })
+
+            days_data.append({
+                "day": day.day_number,
+                "date": str(day.actual_date) if day.actual_date else None,
+                "events": events_data,
+            })
+
+        return JsonResponse({
+            "id": trip_plan.id,
+            "trip_name": trip_plan.trip_name,
+            "destination": trip_plan.destination,
+            "duration": trip_plan.duration,
+            "departure_date": str(trip_plan.departure_date) if trip_plan.departure_date else None,
+            "return_date": str(trip_plan.return_date) if trip_plan.return_date else None,
+            "days": days_data,
+        })
+
+    except TripPlan.DoesNotExist:
+        return JsonResponse(
+            {"error": "일정을 찾을 수 없습니다."},
+            status=404
+        )
