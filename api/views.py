@@ -1,8 +1,9 @@
 import json
 import requests
+from django.conf import settings
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-
+from django.utils import timezone
 from .preprocess import parse_kakao_chat
 from .models import (
     ChatFile,
@@ -27,11 +28,63 @@ def parse_date(value):
 def parse_datetime(base_date, time_value):
     if not base_date or not time_value:
         return None
+
     try:
-        parsed_time = datetime.strptime(time_value, "%H:%M").time()
-        return datetime.combine(base_date, parsed_time)
+        parsed_time = datetime.strptime(
+            time_value,
+            "%H:%M"
+        ).time()
+
+        naive_datetime = datetime.combine(
+            base_date,
+            parsed_time
+        )
+
+        return timezone.make_aware(
+            naive_datetime
+        )
+
     except ValueError:
         return None
+
+def search_kakao_place(place_name, region=None):
+    url = "https://dapi.kakao.com/v2/local/search/keyword.json"
+
+    headers = {
+        "Authorization": f"KakaoAK {settings.KAKAO_REST_API_KEY}"
+    }
+
+    query = place_name
+
+    # 지역명 같이 검색하면 정확도 상승
+    if region:
+        query = f"{region} {place_name}"
+
+    params = {
+        "query": query
+    }
+
+    response = requests.get(
+        url,
+        headers=headers,
+        params=params,
+    )
+    print(response.status_code)
+    print(response.text)
+
+    result = response.json()
+
+    documents = result.get("documents", [])
+
+    if documents:
+        place = documents[0]
+
+        return {
+            "latitude": float(place["y"]),
+            "longitude": float(place["x"]),
+        }
+
+    return None
 
 @csrf_exempt
 def receive_kakao_text(request):
@@ -149,15 +202,39 @@ def receive_kakao_text(request):
                         if not location:
                             continue
 
-                        place_obj, _ = Place.objects.get_or_create(
+                        place_data = search_kakao_place(
+                            location,
+                            result.get("destination")
+                        )
+
+                        latitude = None
+                        longitude = None
+
+                        if place_data:
+                            latitude = place_data["latitude"]
+                            longitude = place_data["longitude"]
+
+                        print("장소:", location)
+                        print("검색 결과:", place_data)
+                        print("위도:", latitude)
+                        print("경도:", longitude)
+
+                        place_obj, created = Place.objects.get_or_create(
                             name=location,
+                            region=result.get("destination"),
                             defaults={
                                 "type": event_data.get("category"),
-                                "latitude": None,
-                                "longitude": None,
-                                "region": result.get("destination"),
+                                "latitude": latitude,
+                                "longitude": longitude,
                             },
                         )
+
+                        # 이미 존재하면 좌표 업데이트
+                        if not created:
+                            place_obj.latitude = latitude
+                            place_obj.longitude = longitude
+                            place_obj.type = event_data.get("category")
+                            place_obj.save()
 
                         Event.objects.create(
                             day=day_obj,
@@ -199,3 +276,46 @@ def test_connection(request):
     return JsonResponse({
         "message": "백엔드와 성공적으로 연결되었습니다!"
     })
+
+def trip_plan_detail(request, trip_plan_id):
+    try:
+        trip_plan = TripPlan.objects.get(id=trip_plan_id)
+
+        days_data = []
+
+        for day in trip_plan.days.all().order_by("day_number"):
+            events_data = []
+
+            for event in day.events.all().order_by("start_datetime"):
+                place = event.place
+
+                events_data.append({
+                    "id": event.id,
+                    "time": event.start_datetime.strftime("%H:%M") if event.start_datetime else None,
+                    "place_name": place.name,
+                    "activity": event.activity,
+                    "latitude": place.latitude,
+                    "longitude": place.longitude,
+                })
+
+            days_data.append({
+                "day": day.day_number,
+                "date": str(day.actual_date) if day.actual_date else None,
+                "events": events_data,
+            })
+
+        return JsonResponse({
+            "id": trip_plan.id,
+            "trip_name": trip_plan.trip_name,
+            "destination": trip_plan.destination,
+            "duration": trip_plan.duration,
+            "departure_date": str(trip_plan.departure_date) if trip_plan.departure_date else None,
+            "return_date": str(trip_plan.return_date) if trip_plan.return_date else None,
+            "days": days_data,
+        })
+
+    except TripPlan.DoesNotExist:
+        return JsonResponse(
+            {"error": "일정을 찾을 수 없습니다."},
+            status=404
+        )

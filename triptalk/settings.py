@@ -123,3 +123,5 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+
+KAKAO_REST_API_KEY = "REMOVED_KAKAO_API_KEY"
