@@ -599,3 +599,94 @@ def trip_plan_detail(request, trip_plan_id):
             {"error": "일정을 찾을 수 없습니다."},
             status=404
         )
+@csrf_exempt
+def confirm_trip_plan(request, trip_plan_id):
+    if request.method != "POST":
+        return JsonResponse({"error": "POST 요청만 가능합니다."}, status=405)
+
+    try:
+        body = json.loads(request.body.decode("utf-8"))
+        days = body.get("days", [])
+
+        trip_plan = TripPlan.objects.get(id=trip_plan_id)
+
+        # 기존 Day/Event/Route/Recommendation 삭제
+        RouteRecommendation.objects.filter(
+            route__from_event__day__trip_plan=trip_plan
+        ).delete()
+
+        Route.objects.filter(
+            from_event__day__trip_plan=trip_plan
+        ).delete()
+
+        Event.objects.filter(
+            day__trip_plan=trip_plan
+        ).delete()
+
+        Day.objects.filter(
+            trip_plan=trip_plan
+        ).delete()
+
+        # 프론트에서 보낸 최종 일정 다시 저장
+        for day_data in days:
+            day_obj = Day.objects.create(
+                trip_plan=trip_plan,
+                day_number=day_data.get("day"),
+                actual_date=day_data.get("date") or None,
+            )
+
+            saved_events = []
+
+            for index, event_data in enumerate(day_data.get("events", [])):
+                # 추천 장소를 사용자가 선택 안 했다면 저장 제외
+                if event_data.get("is_recommended") and not event_data.get("selected"):
+                    continue
+
+                place_obj, _ = Place.objects.get_or_create(
+                    name=event_data.get("place_name"),
+                    defaults={
+                        "source": "KAKAO",
+                        "source_place_id": "",
+                        "category": event_data.get("category") or "ETC",
+                        "latitude": event_data.get("latitude"),
+                        "longitude": event_data.get("longitude"),
+                    }
+                )
+
+                event_obj = Event.objects.create(
+                    day=day_obj,
+                    place=place_obj,
+                    sequence=len(saved_events) + 1,
+                    start_datetime=None,
+                    end_datetime=None,
+                    activity=event_data.get("activity"),
+                )
+
+                saved_events.append(event_obj)
+
+            for i in range(len(saved_events) - 1):
+                Route.objects.create(
+                    from_event=saved_events[i],
+                    to_event=saved_events[i + 1],
+                    distance=None,
+                    duration=None,
+                    route_geometry=None,
+                )
+
+        trip_plan.status = "confirmed"
+        trip_plan.save()
+
+        generate_route_recommendations(trip_plan, max_count=3)
+
+        return JsonResponse({
+            "message": "일정이 확정 저장되었습니다.",
+            "trip_plan_id": trip_plan.id,
+        })
+
+    except TripPlan.DoesNotExist:
+        return JsonResponse({"error": "일정을 찾을 수 없습니다."}, status=404)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({"error": str(e)}, status=400)
