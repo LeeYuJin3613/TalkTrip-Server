@@ -16,4 +16,4 @@ fastapi_app/models/
 # outputs
 result/
 outputs/
-checkpoints/
+checkpoints/fastapi_app/models/**/*.safetensors
