@@ -1,5 +1,6 @@
 from django.urls import path
 from .views import receive_kakao_text, trip_plan_detail
+from . import views
 
 urlpatterns = [
     path('api/chat-files/upload/', receive_kakao_text),

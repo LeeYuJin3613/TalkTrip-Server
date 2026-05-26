@@ -75,43 +75,49 @@ def get_route_by_osrm(from_lat, from_lng, to_lat, to_lng):
         "duration": route.get("duration"),
         "route_geometry": route.get("geometry"),
     }
-
-
-def search_kakao_keyword_places(
-    keyword,
-    x=None,
-    y=None,
-    radius=5000,
-    size=10,
-):
-    url = "https://dapi.kakao.com/v2/local/search/keyword.json"
-
-    headers = {
-        "Authorization": f"KakaoAK {os.getenv('KAKAO_REST_API_KEY')}"
-    }
+def search_tour_location_places(map_x, map_y, radius=3000, content_type_id=None):
+    url = "https://apis.data.go.kr/B551011/KorService2/locationBasedList2"
 
     params = {
-        "query": keyword,
-        "size": size,
+        "serviceKey": settings.TOUR_API_SERVICE_KEY,
+        "MobileOS": "ETC",
+        "MobileApp": "TalkTrip",
+        "_type": "json",
+        "mapX": map_x,
+        "mapY": map_y,
+        "radius": radius,
+        "numOfRows": 10,
+        "pageNo": 1,
+        "arrange": "E",
     }
 
-    if x and y:
-        params["x"] = x
-        params["y"] = y
-        params["radius"] = radius
+    if content_type_id:
+        params["contentTypeId"] = content_type_id
 
-    response = requests.get(
-        url,
-        headers=headers,
-        params=params,
-        timeout=10,
-    )
+    try:
+        response = requests.get(url, params=params, timeout=10)
 
-    if response.status_code != 200:
+        print("관광공사 위치기반 요청:", response.url)
+        print("상태 코드:", response.status_code)
+        print("응답:", response.text[:500])
+
+        if response.status_code != 200:
+            return []
+
+        data = response.json()
+        items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
+
+        if isinstance(items, dict):
+            items = [items]
+
+        if items == "":
+            return []
+
+        return items
+
+    except Exception as e:
+        print("관광공사 위치기반 API 실패:", str(e))
         return []
-
-    return response.json().get("documents", [])
-
 
 def get_min_distance_from_route(place_lat, place_lng, route_geometry):
     coordinates = route_geometry.get("coordinates", [])
@@ -217,10 +223,10 @@ def generate_route_recommendations(trip_plan, max_count=3):
         )
     )
 
-    keywords = [
-        {"keyword": "카페", "category": "CAFE"},
-        {"keyword": "음식점", "category": "FOOD"},
-        {"keyword": "관광명소", "category": "TOUR"},
+    content_types = [
+        {"content_type_id": "39", "category": "FOOD"},  # 음식점
+        {"content_type_id": "12", "category": "TOUR"},  # 관광지
+        {"content_type_id": "28", "category": "ACTIVITY"},  # 레포츠/액티비티
     ]
 
     created_count = 0
@@ -257,7 +263,7 @@ def generate_route_recommendations(trip_plan, max_count=3):
         route.route_geometry = route_data["route_geometry"]
         route.save()
 
-        for item in keywords:
+        for item in content_types:
             if created_count >= max_count:
                 break
 
@@ -268,35 +274,33 @@ def generate_route_recommendations(trip_plan, max_count=3):
                 to_place.longitude,
             )
 
-            kakao_places = search_kakao_keyword_places(
-                item["keyword"],
-                x=middle_lng,
-                y=middle_lat,
+            tour_places = search_tour_location_places(
+                map_x=middle_lng,
+                map_y=middle_lat,
                 radius=5000,
-                size=10,
+                content_type_id=item["content_type_id"],
             )
-            print("=== 카카오 검색 결과 ===")
-            print(kakao_places[:2])
 
-            for kakao_place in kakao_places:
+            print("=== 관광공사 검색 결과 ===")
+            print(tour_places[:2])
+
+            for tour_place in tour_places:
                 if created_count >= max_count:
                     break
 
-                name = kakao_place.get("place_name")
+                name = tour_place.get("title")
 
                 if not name or name in used_place_names:
                     continue
 
-                lat = float(kakao_place["y"])
-                lng = float(kakao_place["x"])
+                lat = float(tour_place.get("mapy"))
+                lng = float(tour_place.get("mapx"))
 
                 distance_from_route = get_min_distance_from_route(
                     lat,
                     lng,
                     route.route_geometry,
                 )
-                print("후보 장소:", name)
-                print("경로 거리:", distance_from_route)
 
                 if distance_from_route is None:
                     continue
@@ -309,14 +313,23 @@ def generate_route_recommendations(trip_plan, max_count=3):
                 place_obj, _ = Place.objects.get_or_create(
                     name=name,
                     defaults={
-                        "source": "KAKAO",
-                        "source_place_id": kakao_place.get("id", ""),
+                        "source": "TOUR_API",
+                        "source_place_id": str(tour_place.get("contentid", "")),
                         "category": item["category"],
-                        "address": kakao_place.get("road_address_name") or kakao_place.get("address_name"),
+                        "address": tour_place.get("addr1"),
                         "latitude": lat,
                         "longitude": lng,
+                        "image_url": tour_place.get("firstimage"),
                     }
                 )
+
+                existing_recommendation = RouteRecommendation.objects.filter(
+                    route=route,
+                    place=place_obj,
+                ).exists()
+
+                if existing_recommendation:
+                    continue
 
                 RouteRecommendation.objects.create(
                     route=route,
@@ -325,8 +338,7 @@ def generate_route_recommendations(trip_plan, max_count=3):
                     distance_from_route=distance_from_route,
                     score=round(score, 3),
                 )
-                print("=== 추천 저장 완료 ===")
-                print(name, score)
+
                 used_place_names.add(name)
                 created_count += 1
 
@@ -496,12 +508,22 @@ def receive_kakao_text(request):
                         saved_events.append(event_obj)
 
                     for i in range(len(saved_events) - 1):
+                        from_event = saved_events[i]
+                        to_event = saved_events[i + 1]
+
+                        route_data = get_route_by_osrm(
+                            from_event.place.latitude,
+                            from_event.place.longitude,
+                            to_event.place.latitude,
+                            to_event.place.longitude,
+                        )
+
                         Route.objects.create(
-                            from_event=saved_events[i],
-                            to_event=saved_events[i + 1],
-                            distance=None,
-                            duration=None,
-                            route_geometry=None,
+                            from_event=from_event,
+                            to_event=to_event,
+                            distance=route_data.get("distance") if route_data else None,
+                            duration=route_data.get("duration") if route_data else None,
+                            route_geometry=route_data.get("route_geometry") if route_data else None,
                         )
 
                 generate_route_recommendations(trip_plan, max_count=3)
