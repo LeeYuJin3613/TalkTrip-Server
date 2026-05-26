@@ -11,7 +11,7 @@ from fastapi_app.inference.stage3 import predict_stage3
 # from .schedule_builder import process as build_schedule
 
 # 새로운 하이브리드 버전 사용
-from .hybrid_schedule_builder import process as build_schedule
+from .hybrid_schedule_builder import process
 
 app = FastAPI()
 
