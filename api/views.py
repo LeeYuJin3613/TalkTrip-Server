@@ -206,7 +206,80 @@ def search_kakao_place(place_name, region=None):
 
     return None
 
-def generate_route_recommendations(trip_plan, max_count=3):
+def build_preference_profile(ai_items):
+    profile = {
+        "FOOD": 0.0,
+        "TOUR": 0.0,
+        "ACTIVITY": 0.0,
+    }
+
+    intent_weight = {
+        "PROPOSE": 1.0,
+        "AGREE": 1.5,
+        "CONFIRM": 2.0,
+        "QUERY": 0.3,
+        "DISAGREE": -1.0,
+        "CANCEL": -2.0,
+        "OTHER": 0.0,
+    }
+
+    entity_category_map = {
+        "FOOD": "FOOD",
+        "LOC": "TOUR",
+        "ACTIVITY": "ACTIVITY",
+    }
+
+    for item in ai_items:
+        if not item.get("in_travel_span", item.get("travel", False)):
+            continue
+
+        intent = item.get("intent_primary") or item.get("intent") or "OTHER"
+        weight = intent_weight.get(intent, 0.0)
+
+        if weight == 0:
+            continue
+
+        for entity in item.get("entities", []):
+            entity_type = entity.get("type")
+            category = entity_category_map.get(entity_type)
+
+            if category:
+                profile[category] += weight
+
+    for key in profile:
+        profile[key] = max(0.0, profile[key])
+
+    max_score = max(profile.values())
+
+    if max_score > 0:
+        profile = {
+            key: round(value / max_score, 3)
+            for key, value in profile.items()
+        }
+
+    return profile
+
+
+def calculate_recommendation_score(distance_from_route, category, preference_profile):
+    route_score = max(0.1, 1 - distance_from_route / 1500)
+    preference_score = preference_profile.get(category, 0.0) * 0.4
+
+    return round(route_score + preference_score, 3)
+
+def generate_route_recommendations(
+    trip_plan,
+    preference_profile=None,
+    max_count=3,
+    max_routes=3,
+    max_per_route=1,
+):
+    if preference_profile is None:
+        preference_profile = {
+            "FOOD": 0.0,
+            "TOUR": 0.0,
+            "ACTIVITY": 0.0,
+        }
+
     routes = Route.objects.filter(
         from_event__day__trip_plan=trip_plan
     ).select_related(
@@ -224,17 +297,14 @@ def generate_route_recommendations(trip_plan, max_count=3):
     )
 
     content_types = [
-        {"content_type_id": "39", "category": "FOOD"},  # 음식점
-        {"content_type_id": "12", "category": "TOUR"},  # 관광지
-        {"content_type_id": "28", "category": "ACTIVITY"},  # 레포츠/액티비티
+        {"content_type_id": "39", "category": "FOOD"},
+        {"content_type_id": "12", "category": "TOUR"},
+        {"content_type_id": "28", "category": "ACTIVITY"},
     ]
 
-    created_count = 0
+    route_infos = []
 
     for route in routes:
-        if created_count >= max_count:
-            break
-
         from_place = route.from_event.place
         to_place = route.to_event.place
 
@@ -252,28 +322,41 @@ def generate_route_recommendations(trip_plan, max_count=3):
         )
 
         if not route_data:
-            print("=== 경로 생성 실패 ===")
             continue
-
-        print("=== 경로 생성 성공 ===")
-        print(route_data)
 
         route.distance = route_data["distance"]
         route.duration = route_data["duration"]
         route.route_geometry = route_data["route_geometry"]
         route.save()
 
+        route_infos.append({
+            "route": route,
+            "distance": route.distance or 0,
+        })
+
+    route_infos.sort(
+        key=lambda x: x["distance"],
+        reverse=True,
+    )
+
+    route_infos = route_infos[:max_routes]
+
+    candidates = []
+
+    for route_info in route_infos:
+        route = route_info["route"]
+        from_place = route.from_event.place
+        to_place = route.to_event.place
+
+
+        middle_lat, middle_lng = get_middle_point(
+            from_place.latitude,
+            from_place.longitude,
+            to_place.latitude,
+            to_place.longitude,
+        )
+
         for item in content_types:
-            if created_count >= max_count:
-                break
-
-            middle_lat, middle_lng = get_middle_point(
-                from_place.latitude,
-                from_place.longitude,
-                to_place.latitude,
-                to_place.longitude,
-            )
-
             tour_places = search_tour_location_places(
                 map_x=middle_lng,
                 map_y=middle_lat,
@@ -281,20 +364,17 @@ def generate_route_recommendations(trip_plan, max_count=3):
                 content_type_id=item["content_type_id"],
             )
 
-            print("=== 관광공사 검색 결과 ===")
-            print(tour_places[:2])
-
             for tour_place in tour_places:
-                if created_count >= max_count:
-                    break
-
                 name = tour_place.get("title")
 
                 if not name or name in used_place_names:
                     continue
 
-                lat = float(tour_place.get("mapy"))
-                lng = float(tour_place.get("mapx"))
+                try:
+                    lat = float(tour_place.get("mapy"))
+                    lng = float(tour_place.get("mapx"))
+                except (TypeError, ValueError):
+                    continue
 
                 distance_from_route = get_min_distance_from_route(
                     lat,
@@ -305,43 +385,77 @@ def generate_route_recommendations(trip_plan, max_count=3):
                 if distance_from_route is None:
                     continue
 
-                if distance_from_route > 500:
+                if distance_from_route > 1500:
                     continue
 
-                score = max(0.1, 1 - distance_from_route / 500)
-
-                place_obj, _ = Place.objects.get_or_create(
-                    name=name,
-                    defaults={
-                        "source": "TOUR_API",
-                        "source_place_id": str(tour_place.get("contentid", "")),
-                        "category": item["category"],
-                        "address": tour_place.get("addr1"),
-                        "latitude": lat,
-                        "longitude": lng,
-                        "image_url": tour_place.get("firstimage"),
-                    }
-                )
-
-                existing_recommendation = RouteRecommendation.objects.filter(
-                    route=route,
-                    place=place_obj,
-                ).exists()
-
-                if existing_recommendation:
-                    continue
-
-                RouteRecommendation.objects.create(
-                    route=route,
-                    place=place_obj,
-                    category=item["category"],
+                score = calculate_recommendation_score(
                     distance_from_route=distance_from_route,
-                    score=round(score, 3),
+                    category=item["category"],
+                    preference_profile=preference_profile,
                 )
 
-                used_place_names.add(name)
-                created_count += 1
+                candidates.append({
+                    "route": route,
+                    "tour_place": tour_place,
+                    "name": name,
+                    "lat": lat,
+                    "lng": lng,
+                    "category": item["category"],
+                    "distance_from_route": distance_from_route,
+                    "score": score,
+                })
 
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+
+    selected_candidates = []
+    selected_names = set()
+    selected_route_counts = {}
+
+    for candidate in candidates:
+        if len(selected_candidates) >= max_count:
+            break
+
+        route_id = candidate["route"].id
+
+        if candidate["name"] in selected_names:
+            continue
+
+        if selected_route_counts.get(route_id, 0) >= max_per_route:
+            continue
+
+        selected_candidates.append(candidate)
+        selected_names.add(candidate["name"])
+        selected_route_counts[route_id] = selected_route_counts.get(route_id, 0) + 1
+
+    for candidate in selected_candidates:
+        tour_place = candidate["tour_place"]
+
+        place_obj, _ = Place.objects.get_or_create(
+            name=candidate["name"],
+            defaults={
+                "source": "TOUR_API",
+                "source_place_id": str(tour_place.get("contentid", "")),
+                "category": candidate["category"],
+                "address": tour_place.get("addr1"),
+                "latitude": candidate["lat"],
+                "longitude": candidate["lng"],
+                "image_url": tour_place.get("firstimage"),
+            }
+        )
+
+        if RouteRecommendation.objects.filter(
+            route=candidate["route"],
+            place=place_obj,
+        ).exists():
+            continue
+
+        RouteRecommendation.objects.create(
+            route=candidate["route"],
+            place=place_obj,
+            category=candidate["category"],
+            distance_from_route=candidate["distance_from_route"],
+            score=candidate["score"],
+        )
 @csrf_exempt
 def receive_kakao_text(request):
     if request.method == "POST":
@@ -525,9 +639,27 @@ def receive_kakao_text(request):
                             duration=route_data.get("duration") if route_data else None,
                             route_geometry=route_data.get("route_geometry") if route_data else None,
                         )
+                ai_items = (
+                        fastapi_result.get("analyzed_messages")
+                        or fastapi_result.get("results")
+                        or fastapi_result.get("messages")
+                        or result.get("messages")
+                        or result.get("items")
+                        or []
+                )
 
-                generate_route_recommendations(trip_plan, max_count=3)
+                preference_profile = build_preference_profile(ai_items)
 
+                print("=== 취향 프로필 ===")
+                print(preference_profile)
+
+                generate_route_recommendations(
+                    trip_plan,
+                    preference_profile=preference_profile,
+                    max_count=3,
+                    max_routes=3,
+                    max_per_route=1,
+                )
             except Exception as e:
                 print("=== FastAPI 연결 실패 ===")
                 print(str(e))
@@ -699,7 +831,12 @@ def confirm_trip_plan(request, trip_plan_id):
         trip_plan.status = "confirmed"
         trip_plan.save()
 
-        generate_route_recommendations(trip_plan, max_count=3)
+        generate_route_recommendations(
+            trip_plan,
+            max_count=3,
+            max_routes=3,
+            max_per_route=1,
+        )
 
         return JsonResponse({
             "message": "일정이 확정 저장되었습니다.",
