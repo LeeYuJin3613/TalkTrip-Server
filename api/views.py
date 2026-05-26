@@ -1,6 +1,7 @@
 import json
 import math
 import requests
+import os
 from django.conf import settings
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -86,7 +87,7 @@ def search_kakao_keyword_places(
     url = "https://dapi.kakao.com/v2/local/search/keyword.json"
 
     headers = {
-        "Authorization": f"KakaoAK {settings.KAKAO_REST_API_KEY}"
+        "Authorization": f"KakaoAK {os.getenv('KAKAO_REST_API_KEY')}"
     }
 
     params = {

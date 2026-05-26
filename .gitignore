@@ -7,7 +7,9 @@
 *.pt
 *.pth
 *.pyc
-
+.env
+.env.*
+.DS_Store
 # model folders
 fastapi_app/models/
 
