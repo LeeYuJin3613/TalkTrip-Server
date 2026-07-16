@@ -726,7 +726,7 @@ def trip_plan_detail(request, trip_plan_id):
                             "id": rec.id,
                             "time": None,
                             "place_name": rec_place.name,
-                            "activity": "추천 장소",
+                            "activity": "이동 중 함께 들러보기 좋은 장소",
                             "latitude": rec_place.latitude,
                             "longitude": rec_place.longitude,
                             "category": rec.category,
@@ -738,7 +738,29 @@ def trip_plan_detail(request, trip_plan_id):
                 "date": str(day.actual_date) if day.actual_date else None,
                 "events": events_data,
             })
+        routes_data = []
 
+        for route in Route.objects.filter(
+                from_event__day__trip_plan=trip_plan
+        ).select_related(
+            "from_event__place",
+            "to_event__place",
+            "from_event__day",
+        ).order_by(
+            "from_event__day__day_number",
+            "from_event__sequence",
+        ):
+            routes_data.append({
+                "id": route.id,
+                "from_event_id": route.from_event.id,
+                "to_event_id": route.to_event.id,
+                "from_place": route.from_event.place.name,
+                "to_place": route.to_event.place.name,
+                "day": route.from_event.day.day_number,
+                "distance": route.distance,
+                "duration": route.duration,
+                "route_geometry": route.route_geometry,
+            })
         return JsonResponse({
             "id": trip_plan.id,
             "trip_name": trip_plan.trip_name,
@@ -747,6 +769,7 @@ def trip_plan_detail(request, trip_plan_id):
             "departure_date": str(trip_plan.departure_date) if trip_plan.departure_date else None,
             "return_date": str(trip_plan.return_date) if trip_plan.return_date else None,
             "days": days_data,
+            "routes": routes_data,
         })
 
     except TripPlan.DoesNotExist:
@@ -764,7 +787,25 @@ def confirm_trip_plan(request, trip_plan_id):
         days = body.get("days", [])
 
         trip_plan = TripPlan.objects.get(id=trip_plan_id)
+        route_cache = {}
 
+        for route in Route.objects.filter(
+                from_event__day__trip_plan=trip_plan
+        ).select_related(
+            "from_event__place",
+            "to_event__place",
+        ):
+            key = (
+                route.from_event.place.name,
+                route.to_event.place.name,
+            )
+
+            if route.route_geometry:
+                route_cache[key] = {
+                    "distance": route.distance,
+                    "duration": route.duration,
+                    "route_geometry": route.route_geometry,
+                }
         # 기존 Day/Event/Route/Recommendation 삭제
         RouteRecommendation.objects.filter(
             route__from_event__day__trip_plan=trip_plan
@@ -794,19 +835,22 @@ def confirm_trip_plan(request, trip_plan_id):
 
             for index, event_data in enumerate(day_data.get("events", [])):
                 # 추천 장소를 사용자가 선택 안 했다면 저장 제외
-                if event_data.get("is_recommended") and not event_data.get("selected"):
-                    continue
 
                 place_obj, _ = Place.objects.get_or_create(
                     name=event_data.get("place_name"),
                     defaults={
-                        "source": "KAKAO",
+                        "source": "TOUR_API" if event_data.get("is_recommended") else "KAKAO",
                         "source_place_id": "",
                         "category": event_data.get("category") or "ETC",
                         "latitude": event_data.get("latitude"),
                         "longitude": event_data.get("longitude"),
                     }
                 )
+
+                place_obj.latitude = event_data.get("latitude")
+                place_obj.longitude = event_data.get("longitude")
+                place_obj.category = event_data.get("category") or place_obj.category
+                place_obj.save()
 
                 event_obj = Event.objects.create(
                     day=day_obj,
@@ -820,23 +864,47 @@ def confirm_trip_plan(request, trip_plan_id):
                 saved_events.append(event_obj)
 
             for i in range(len(saved_events) - 1):
+                from_event = saved_events[i]
+                to_event = saved_events[i + 1]
+
+                key = (
+                    from_event.place.name,
+                    to_event.place.name,
+                )
+
+                route_data = route_cache.get(key)
+
+                if not route_data:
+                    route_data = None
+
+                    if (
+                            from_event.place.latitude and from_event.place.longitude and
+                            to_event.place.latitude and to_event.place.longitude
+                    ):
+                        route_data = get_route_by_osrm(
+                            from_event.place.latitude,
+                            from_event.place.longitude,
+                            to_event.place.latitude,
+                            to_event.place.longitude,
+                        )
+
                 Route.objects.create(
-                    from_event=saved_events[i],
-                    to_event=saved_events[i + 1],
-                    distance=None,
-                    duration=None,
-                    route_geometry=None,
+                    from_event=from_event,
+                    to_event=to_event,
+                    distance=route_data.get("distance") if route_data else None,
+                    duration=route_data.get("duration") if route_data else None,
+                    route_geometry=route_data.get("route_geometry") if route_data else None,
                 )
 
         trip_plan.status = "confirmed"
         trip_plan.save()
 
-        generate_route_recommendations(
-            trip_plan,
-            max_count=3,
-            max_routes=3,
-            max_per_route=1,
-        )
+        # generate_route_recommendations(
+        #     trip_plan,
+        #     max_count=3,
+        #     max_routes=3,
+        #     max_per_route=1,
+        # )
 
         return JsonResponse({
             "message": "일정이 확정 저장되었습니다.",
